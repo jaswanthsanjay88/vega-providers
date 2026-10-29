@@ -45,11 +45,12 @@ export const getEpisodes = async function ({
   return episodes.map((ep) => ({
     title: `Episode ${ep.episode_number}: ${ep.name || ""}`.trim(),
     link: JSON.stringify({
-      id,
-      season,
-      episode: ep.episode_number,
+      id: String(id),
+      season: Number(season),
+      episode: Number(ep.episode_number),
       type: "tv",
     }),
+    id: String(ep.id || `${id}-${season}-${ep.episode_number}`),
     description: ep.overview || undefined,
     image: ep.still_path
       ? `https://image.tmdb.org/t/p/w500${ep.still_path}`

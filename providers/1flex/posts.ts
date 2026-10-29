@@ -32,8 +32,7 @@ export const getPosts = async function ({
     .filter((item) => {
       const hasPoster = Boolean(item.poster_path);
       const isReleased = Boolean(item.release_date || item.first_air_date);
-      const hasVotes = item.vote_count == null || item.vote_count > 30;
-      return hasPoster && isReleased && hasVotes;
+      return hasPoster && isReleased;
     })
     .map((item) => {
       const isMovie = Boolean(
@@ -72,7 +71,8 @@ export const getSearchPosts = async function ({
 }): Promise<Post[]> {
   const { axios } = providerContext;
 
-  const url = `${DB_BASE}/search/multi?query=${encodeURIComponent(searchQuery)}&page=${page}`;
+  const cleanQuery = searchQuery.trim();
+  const url = `${DB_BASE}/search/multi?query=${encodeURIComponent(cleanQuery)}&page=${page}`;
   const response = await axios.get(url, {
     signal,
     headers: {
@@ -84,9 +84,14 @@ export const getSearchPosts = async function ({
 
   const results: any[] = response.data?.results || [];
   return results
-    .filter((item) => item.media_type === "movie" || item.media_type === "tv")
+    .filter((item) => {
+      const type =
+        item.media_type || (item.title ? "movie" : item.name ? "tv" : null);
+      return type === "movie" || type === "tv";
+    })
     .map((item) => {
-      const isMovie = item.media_type === "movie";
+      const isMovie =
+        item.media_type === "movie" || Boolean(item.title && !item.name);
       const mediaType = isMovie ? "movie" : "tv";
       const title = item.title || item.name || "Untitled";
       const image = item.poster_path

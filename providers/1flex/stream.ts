@@ -105,7 +105,69 @@ export const getStream = async function ({
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   };
 
-  // 1. Fetch metadata in background (only needed for third-party scrapers)
+  // 1. Subtitles in parallel
+  const subsEndpoint = isMovie
+    ? `${CORE_BASE}/subs/movie/${tmdbId}`
+    : `${CORE_BASE}/subs/tv/${tmdbId}/${season}/${episode}`;
+
+  const subsPromise = axios
+    .get(subsEndpoint, { signal, timeout: 2000, headers })
+    .then((res: any) => {
+      if (Array.isArray(res.data)) {
+        return res.data.map((sub: any) => ({
+          title: sub.label || "Unknown",
+          language: sub.label || "en",
+          type: "text/vtt",
+          uri: sub.file,
+        })) as TextTracks;
+      }
+      return [] as TextTracks;
+    })
+    .catch(() => [] as TextTracks);
+
+  // 2. Native Viduki streams (Fastest, direct CDN player backend)
+  const vidukiPromise = extractVidukiStreams({
+    tmdbId,
+    season: Number(season),
+    episode: Number(episode),
+    isMovie,
+    axios,
+    signal,
+  })
+    .then((vStreams) =>
+      vStreams.map((v) => ({
+        server: v.server,
+        link: v.url,
+        type: v.type,
+        quality: v.quality,
+        headers: v.headers,
+      }))
+    )
+    .catch(() => [] as Stream[]);
+
+  // Fast-Path: Check native Viduki streams first
+  const vidukiStreams = await vidukiPromise;
+  if (vidukiStreams && vidukiStreams.length > 0) {
+    // Quick race for subtitles (up to 600ms) so stream start is not delayed
+    const subtitles = await Promise.race([
+      subsPromise,
+      new Promise<TextTracks>((resolve) =>
+        setTimeout(() => resolve([] as TextTracks), 600)
+      ),
+    ]).catch(() => [] as TextTracks);
+
+    return vidukiStreams.map((s) => ({
+      ...s,
+      subtitles:
+        s.subtitles && s.subtitles.length > 0
+          ? s.subtitles
+          : subtitles.length > 0
+          ? subtitles
+          : undefined,
+    }));
+  }
+
+  // Fallback Path: Only reached if Viduki has no streams for this title
   let title = parsed.title || "";
   let year = parsed.year || "";
   let imdbId = parsed.imdbId || "";
@@ -135,47 +197,6 @@ export const getStream = async function ({
     }
   })();
 
-  // 2. Subtitles in parallel
-  const subsEndpoint = isMovie
-    ? `${CORE_BASE}/subs/movie/${tmdbId}`
-    : `${CORE_BASE}/subs/tv/${tmdbId}/${season}/${episode}`;
-
-  const subsPromise = axios
-    .get(subsEndpoint, { signal, timeout: 2000, headers })
-    .then((res: any) => {
-      if (Array.isArray(res.data)) {
-        return res.data.map((sub: any) => ({
-          title: sub.label || "Unknown",
-          language: sub.label || "en",
-          type: "text/vtt",
-          uri: sub.file,
-        })) as TextTracks;
-      }
-      return [] as TextTracks;
-    })
-    .catch(() => [] as TextTracks);
-
-  // 3. Native Viduki streams (Fastest, direct player backend)
-  const vidukiPromise = extractVidukiStreams({
-    tmdbId,
-    season: Number(season),
-    episode: Number(episode),
-    isMovie,
-    axios,
-    signal,
-  })
-    .then((vStreams) =>
-      vStreams.map((v) => ({
-        server: v.server,
-        link: v.url,
-        type: v.type,
-        quality: v.quality,
-        headers: v.headers,
-      }))
-    )
-    .catch(() => [] as Stream[]);
-
-  // 4. Native Vidzee streams (FastCloud)
   const vidzeeServers = [
     { id: "dcloud", name: "1Flex - FastCloud (1080p)" },
     { id: "tik", name: "1Flex - TikCloud (Backup)" },
@@ -222,7 +243,6 @@ export const getStream = async function ({
     vidzeeServers.map((s) => fetchVidzeeServerStream(s))
   ).then((res) => res.filter((s): s is NonNullable<typeof s> => s !== null));
 
-  // 5. Fallback scrapers (Cinejoy, Movy, Vidstuck)
   const fallbackScrapersPromise = (async () => {
     await metaPromise.catch(() => {});
     const [cj, mv, vs] = await Promise.all([
@@ -261,33 +281,15 @@ export const getStream = async function ({
     return [...(cj || []), ...(mv || []), ...(vs || [])];
   })();
 
-  // Fast-Path: Await native high-speed streams (Viduki + Vidzee)
-  const [subtitles, vidukiStreams, vidzeeStreams] = await Promise.all([
+  const [subtitles, vidzeeStreams, fallbackStreams] = await Promise.all([
     subsPromise,
-    vidukiPromise,
     vidzeePromise,
+    fallbackScrapersPromise,
   ]);
 
-  const nativeStreams: Stream[] = [
-    ...(vidukiStreams || []),
-    ...(vidzeeStreams || []),
-  ];
+  const allFallbackStreams = [...vidzeeStreams, ...fallbackStreams];
 
-  // If native streams are found, race a brief 1000ms window for fallback scrapers.
-  // If native streams are not found, wait fully for fallback scrapers.
-  let extraStreams: Stream[] = [];
-  if (nativeStreams.length > 0) {
-    const briefGracePeriod = new Promise<Stream[]>((resolve) =>
-      setTimeout(() => resolve([]), 1000)
-    );
-    extraStreams = await Promise.race([fallbackScrapersPromise, briefGracePeriod]);
-  } else {
-    extraStreams = await fallbackScrapersPromise;
-  }
-
-  const allStreams = [...nativeStreams, ...(extraStreams || [])];
-
-  return allStreams.map((s) => ({
+  return allFallbackStreams.map((s) => ({
     ...s,
     subtitles:
       s.subtitles && s.subtitles.length > 0
